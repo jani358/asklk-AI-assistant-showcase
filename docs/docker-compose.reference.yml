@@ -1,0 +1,101 @@
+# Reference only. All credentials come from a local .env file (never committed);
+# `docker compose` reads it automatically. See .env.example in the private repo.
+services:
+  postgres:
+    # pgvector/pgvector, NOT the plain postgres image.
+    #
+    # The stock postgres:16 image does not ship the vector extension, so
+    # `CREATE EXTENSION vector` in the first migration fails and nothing works.
+    # This image is the official pgvector build on top of postgres 16.
+    image: pgvector/pgvector:pg16
+    container_name: asklk-postgres
+    environment:
+      POSTGRES_USER: asklk
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: asklk
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U asklk"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: asklk-redis
+    ports:
+      - "6379:6379"
+    # appendonly so the ingestion queue survives a restart. A lost job would
+    # leave a document stuck in QUEUED with nothing coming to process it.
+    command: redis-server --appendonly yes
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # --- application services ---
+  # Enable with:  docker compose --profile full up -d
+  # Day-to-day development runs the apps on the host against the two services
+  # above, which gives hot reload.
+
+  api:
+    build:
+      # Root context, so the same image can also build and serve apps/widget as
+      # /widget.js. One deployable for the whole product.
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: asklk-api
+    profiles: ["full"]
+    environment:
+      DATABASE_URL: postgresql://asklk:${POSTGRES_PASSWORD:?set in .env}@postgres:5432/asklk
+      REDIS_URL: redis://redis:6379
+      # No defaults for these. The config schema rejects a placeholder, so a
+      # missing value is a clear boot failure rather than a forgeable token.
+      #
+      # Quoted because the ${VAR:?message} error text contains ": " and "://",
+      # which YAML would otherwise read as a nested mapping.
+      JWT_SECRET: "${JWT_SECRET:?set in .env - generate one with openssl rand -hex 32}"
+      JWT_REFRESH_SECRET: "${JWT_REFRESH_SECRET:?set in .env - must differ from JWT_SECRET}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:?set in .env - get a free key from Google AI Studio}"
+      STORAGE_DIR: /data/storage
+      CORS_ORIGINS: http://localhost:3001
+      PORT: 3000
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    volumes:
+      # Uploaded files must outlive the container. Without this, a `docker
+      # compose up --build` silently deletes every customer's documents while
+      # leaving the database rows pointing at them.
+      - storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    container_name: asklk-web
+    profiles: ["full"]
+    environment:
+      # The browser resolves this, not the container, so it is localhost and not
+      # the compose service name.
+      NEXT_PUBLIC_API_URL: http://localhost:3000/api
+    ports:
+      - "3001:3001"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  redisdata:
+  storage:
