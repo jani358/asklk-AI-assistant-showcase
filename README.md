@@ -1,6 +1,6 @@
 # AskLK
 
-**Full source: [github.com/jani358/asklk-ai-assistant](https://github.com/jani358/asklk-ai-assistant)**
+**Full source is private. I can walk through it or share access with interviewers on request.**
 
 A white-label AI assistant that a Sri Lankan organisation can point at its own documents. A tuition
 teacher uploads notes and past papers and students ask questions. A clinic uploads its FAQ and patients
@@ -62,7 +62,7 @@ can't create a source.
 
 There's an offline eval gate in CI with 46 golden cases (fake model, hash embeddings, an overlap judge),
 so it needs no API key: faithfulness 100%, recall@5 100%, refusal 91.7%. Injection resistance went from
-0% to 100% after a prompt-injection [postmortem](https://github.com/jani358/asklk-ai-assistant/blob/main/docs/POSTMORTEM-001-prompt-injection.md).
+0% to 100% after a prompt-injection [postmortem](docs/POSTMORTEM-001-prompt-injection.md).
 These are numbers on the offline setup, not on a live model.
 
 [`samples/rag-citations/`](samples/rag-citations/)
@@ -97,7 +97,7 @@ still go to local disk; the S3 bucket exists in Terraform but the app has no S3 
 Copies of the main docs are in [`docs/`](docs/):
 [architecture](docs/01-ARCHITECTURE.md), [RAG explained](docs/02-RAG-EXPLAINED.md) (start here if you
 read one), [database](docs/03-DATABASE.md), [security](docs/04-SECURITY.md). The ADRs, deployment
-guide and agent/MCP notes are in the [main repo](https://github.com/jani358/asklk-ai-assistant/tree/main/docs).
+guide and agent/MCP notes are in [docs](docs/) (the full set lives in the private repo).
 
 ## License
 
