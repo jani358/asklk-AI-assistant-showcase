@@ -1,158 +1,104 @@
-# AskLK — White-label Bilingual AI Assistant (Multi-tenant RAG) · Showcase
+# AskLK
 
-> **This is a public showcase of a private product.** The full source is private (it is being built as a SaaS).
-> This repo contains the architecture, RAG, database and security design, selected code excerpts, and a demo,
-> so that recruiters and clients can evaluate the concept and the engineering quality.
-> Full read-only source access can be granted on request for interviews. See [LICENSE](LICENSE).
+**Full source: [github.com/jani358/asklk-ai-assistant](https://github.com/jani358/asklk-ai-assistant)**
 
-**Author:** Janindu Gayanga · [iamjanindu.com](https://iamjanindu.com) · [LinkedIn](https://www.linkedin.com/in/janindu-gayanga-02ba60217) · janindugayanga10@gmail.com
+A white-label AI assistant that a Sri Lankan organisation can point at its own documents. A tuition
+teacher uploads notes and past papers and students ask questions. A clinic uploads its FAQ and patients
+ask about services. Ask in Sinhala and you get Sinhala, even when the document is in English.
 
----
+This repo started as the public face of a private project. The main repo is public now, so this is a
+short tour with a few excerpts. Everything is in the main repo, including the tests.
 
-## What it is
+Janindu Gayanga · [iamjanindu.com](https://iamjanindu.com) · [LinkedIn](https://www.linkedin.com/in/janindu-gayanga-02ba60217) · janindugayanga10@gmail.com
 
-AskLK is a white-label AI assistant any Sri Lankan organisation can point at its own documents.
-A tuition teacher uploads notes and past papers; students ask questions and get answers. A clinic uploads
-its FAQ; patients ask about services. A company uploads its policies; staff ask about leave.
+![Public chat: a cited answer, then a ticket waiting for confirmation](screenshots/v3-chat-dark.png)
 
-**Ask in Sinhala, get Sinhala. Ask in English, get English** — even when the source document is in the
-other language. Answers are grounded in the customer's own documents, with citations, and the assistant
-refuses rather than guessing when the documents do not contain the answer.
+## What it does
 
-It ships as a dashboard and as a **14.1KB** embeddable widget (4.4KB gzipped) that drops into any
-customer website with one `<script>` tag.
-
-**Live demo:** _coming soon_ · **Demo video (3 min):** _coming soon_
-
-## Features
-
-| Area | What is built |
-|---|---|
-| Tenants | Multi-tenant from the first row — `tenantId` on every owned table and in every `WHERE` clause, always taken from the verified JWT |
-| Documents | PDF / Word / text upload, queued ingestion, extraction → chunking → embedding, live status and human-readable failure reasons |
-| Retrieval | **Hybrid search in one SQL query**: pgvector cosine + PostgreSQL full-text, merged with Reciprocal Rank Fusion |
-| Answering | Streaming answers over SSE, inline citations, source cards rendered from retrieved rows |
-| Anti-hallucination | Four layers — similarity floor before the model is called, prompt constraints, citation validation, row-derived sources |
-| Bilingual | Sinhala ⇄ English across the question, the document and the answer, with a language-aware token estimate |
-| Widget | Vanilla TypeScript, Shadow DOM isolation, streaming, source chips, SI/EN toggle, origin allow-list |
-| Auth & security | JWT access + refresh rotation with reuse detection, RBAC (owner / admin), rate limiting, per-tenant quotas |
-| Platform | Docker Compose, GitHub Actions CI (typecheck · unit · integration · E2E), Swagger/OpenAPI |
-
-## Stack
-
-- **API:** NestJS 10 · TypeScript · Prisma · PostgreSQL 16 + **pgvector** · Redis · Swagger/OpenAPI · Jest
-- **AI:** Google Gemini free tier — `gemini-2.5-flash` generation, `gemini-embedding-001` embeddings at **768d**
-- **Web:** Next.js 14 App Router · TanStack Query · Zustand · Tailwind · lucide-react
-- **Widget:** Vanilla TypeScript · Shadow DOM · no framework — 14.1KB raw / 4.4KB gzipped
-- **Infra:** Docker · docker-compose · GitHub Actions
-- **Testing:** Jest (80 unit tests) · integration against a real pgvector database · Playwright E2E
-
-## Architecture
-
-```
-   ┌──────────────────┐   ┌──────────────────────┐
-   │  Widget (14KB)   │   │  Next.js 14  :3001   │
-   │  any customer    │   │  dashboard + chat    │
-   │  site, Shadow DOM│   │  TanStack · Zustand  │
-   └────────┬─────────┘   └──────────┬───────────┘
-            │      REST + SSE        │
-            └───────────┬────────────┘
-                        ▼
-            ┌───────────────────────────┐
-            │   NestJS API      :3000   │
-            │   auth · RBAC · tenants   │
-            │   RAG pipeline · SSE      │
-            └──┬─────────┬──────────┬───┘
-               │         │          │
-               ▼         ▼          ▼
-   ┌──────────────┐ ┌─────────┐ ┌──────────────┐
-   │ PostgreSQL   │ │  Redis  │ │ Gemini API   │
-   │ + pgvector   │ │ queue   │ │ 2.5-flash    │
-   │ chunks·FTS   │ │ cache   │ │ embedding-001│
-   │ tenants·docs │ │ limits  │ │              │
-   └──────────────┘ └────┬────┘ └──────────────┘
-                         │ BRPOP
-                    ┌────▼─────────────┐
-                    │ Ingestion worker │
-                    │ extract·chunk·   │
-                    │ embed            │
-                    └──────────────────┘
-```
-
-Full write-ups: [docs/01-ARCHITECTURE.md](docs/01-ARCHITECTURE.md) · [docs/02-RAG-EXPLAINED.md](docs/02-RAG-EXPLAINED.md) · [docs/03-DATABASE.md](docs/03-DATABASE.md) · [docs/04-SECURITY.md](docs/04-SECURITY.md)
-
-> `02-RAG-EXPLAINED.md` is the one to read if you only read one: RAG in plain words, embeddings, chunking,
-> hybrid search and RRF, the anti-hallucination layers, and how bilingual answering actually works.
-
-## Code excerpts (read-only)
-
-| File | Why it is here |
-|---|---|
-| [samples/rag-hybrid-search/fusion.ts](samples/rag-hybrid-search/fusion.ts) | Reciprocal Rank Fusion — merging two ranked lists whose scores cannot be compared, and why `k = 60` |
-| [samples/rag-hybrid-search/fusion.spec.ts](samples/rag-hybrid-search/fusion.spec.ts) | Property tests, including the central one: rank 3 in both lists beats rank 1 in only one |
-| [samples/rag-hybrid-search/retrieval.service.ts](samples/rag-hybrid-search/retrieval.service.ts) | The two search arms in raw parameterised SQL, with tenant isolation **inside** the `WHERE` clause |
-| [samples/rag-citations/citations.ts](samples/rag-citations/citations.ts) | Anti-hallucination: the similarity floor, and citation validation that strips invented markers |
-| [samples/rag-citations/citations.spec.ts](samples/rag-citations/citations.spec.ts) | Tested against how models actually misbehave — invented indices, mixed `[1, 9]` groups, Sinhala answers |
-| [samples/rag-chunking/chunking.ts](samples/rag-chunking/chunking.ts) | The chunker, and a bilingual token estimate. **This file had a real bug a test caught** |
-| [samples/rag-chunking/chunking.spec.ts](samples/rag-chunking/chunking.spec.ts) | The tests that caught the overlap bug before a single document was ingested |
-| [docs/docker-compose.reference.yml](docs/docker-compose.reference.yml) | How the services are wired locally |
+- Upload PDFs, Word files or text. They're extracted, chunked and embedded in the background, with a
+  readable reason when something fails (a scanned PDF with no text, for example).
+- Answers stream over SSE with inline citations. The source cards come from the retrieved rows, not
+  from the model's text.
+- A tool-calling agent can search, read a passage, list documents and open a support ticket. It stops
+  after five steps, and anything that writes data waits for the user to confirm.
+- Each organisation picks Gemini, Claude or an OpenAI-compatible model. A fast model classifies and a
+  stronger one answers.
+- An MCP server (stdio and streamable HTTP) lets Claude search an organisation's documents with a
+  tenant API key. I ran it from Claude Code against a local API; that's the last screenshot below.
+- An embeddable widget in vanilla TypeScript inside a Shadow DOM: 17 KB raw, 5 KB gzipped.
 
 ## Screenshots
 
 | | |
 |---|---|
-| **Documents** — upload, live ingestion status, failure reasons<br>![Documents](screenshots/01-documents.png) | **Test console** — streaming answers with source chips<br>![Playground](screenshots/02-playground.png) |
-| **Bilingual** — Sinhala question, English document, Sinhala answer<br>![Bilingual](screenshots/03-bilingual.png) | **Citations** — inline markers and the passages behind them<br>![Citations](screenshots/04-citations.png) |
-| **Refusal** — no answer in the corpus, so it refuses instead of guessing<br>![Refusal](screenshots/05-refusal.png) | **Unanswered questions** — the gaps in your documents<br>![Unanswered](screenshots/06-unanswered.png) |
-| **Widget on a customer site** — Shadow DOM, 14KB<br>![Widget](screenshots/07-widget.png) | **Usage & quota**<br>![Usage](screenshots/08-usage.png) |
+| ![Landing](screenshots/v3-landing-dark.png)<br>Landing page | ![Playground](screenshots/v3-playground-dark.png)<br>Playground: tool steps and citations |
+| ![Dashboard](screenshots/v3-dashboard-light.png)<br>Dashboard | ![Settings](screenshots/v3-settings-light.png)<br>Model provider and API keys |
 
-## The interesting problems
+![Claude Code calling search_documents](screenshots/v3-mcp-claude-code.png)
 
-**One datastore, not two.** The embeddings live in PostgreSQL via pgvector rather than a dedicated vector
-database. That means a single SQL statement combines the tenant pre-filter, the document-status filter and
-the vector similarity search — and chunks stay transactionally consistent with the documents they came
-from. A standalone vector DB would put the filter in one system and the data in another, and re-ingesting
-a document would stop being atomic.
+## How retrieval works
 
-**Hybrid retrieval with Reciprocal Rank Fusion.** Vector search finds passages that *mean* the same thing
-— which is what lets a Sinhala question match an English passage at all. Full-text search finds passages
-containing the same *words*, which embeddings are systematically bad at for rare exact tokens like
-"G.C.E. A/L 2026" or a phone number. The two are merged by rank, not score, because cosine similarity in
-[-1,1] and an unbounded `ts_rank` cannot be meaningfully added. A document ranked 3rd in **both** lists
-beats one ranked 1st in only one.
+Two queries, merged in TypeScript. A pgvector cosine query finds passages that mean the same thing,
+which is what lets a Sinhala question match an English passage at all. A Postgres full-text query
+finds the exact tokens embeddings are bad at, like "G.C.E. A/L 2026" or a phone number. The two lists
+are merged with reciprocal rank fusion, by rank rather than score, because a cosine similarity and a
+`ts_rank` can't be added up. A passage ranked 3rd in both lists beats one ranked 1st in only one.
 
-**Four layers of anti-hallucination.** A similarity floor below which the bot refuses *before the model is
-ever called* — that both prevents the wrong answer and saves the most expensive call in the pipeline.
-Prompt constraints. Citation validation that strips any marker pointing at a passage that was never
-retrieved. And source cards rendered from the retrieved **rows**, never parsed out of the model's text —
-so an invented citation cannot manufacture a source.
+Both queries filter on `tenantId` inside the SQL, and the vectors live in the same database as the rows,
+so the tenant pre-filter and the similarity search are one statement each. On top of that, Postgres
+row-level security runs through a scoped app role, so a missing `WHERE` is caught by the database too.
 
-**Tenant isolation in the WHERE clause.** Every tenant-owned row carries `tenantId`, every query filters on
-it in SQL, and the value always comes from the verified JWT — never from a request body. An integration
-test seeds two tenants and asserts that tenant A asking a question worded to match tenant B's document
-*exactly* retrieves nothing of B's.
+The embeddings are `gemini-embedding-001` at 768 dimensions, not the default 3072, because pgvector's
+HNSW index tops out at 2000 dimensions. A 3072-d column can be stored but never indexed.
 
-**768 dimensions, not 3072.** `gemini-embedding-001` returns 3072 by default, but pgvector's HNSW and
-IVFFlat indexes cap at 2000 — a 3072d column can be stored and never indexed, so every query would
-sequentially scan every chunk. The model is Matryoshka-trained, so a 768d output keeps almost all the
-retrieval quality at a quarter of the storage.
+[`samples/rag-hybrid-search/`](samples/rag-hybrid-search/)
 
-**A chunker bug a test caught.** An overlap tail added to a paragraph that already filled the chunk pushed
-every chunk over target. Nobody would have noticed from the output — the answers would simply have been
-slightly worse, forever. A unit test caught it before a single document was ever ingested, which is the
-argument for testing pure logic that has no visible failure mode.
+## Not making things up
 
-## Status & roadmap
+Four layers. A similarity floor makes the bot refuse before the model is ever called, which also skips
+the most expensive call in the pipeline. The prompt constrains it. Citation markers that point at a
+passage that wasn't retrieved are stripped. And the source cards come from rows, so an invented citation
+can't create a source.
 
-MVP complete — 23 API routes, hybrid retrieval, the four anti-hallucination layers, the Next.js dashboard,
-the embeddable widget, 7 guides in both English and Sinhala, and CI across all three apps
-(typecheck · unit · integration · E2E).
+There's an offline eval gate in CI with 46 golden cases (fake model, hash embeddings, an overlap judge),
+so it needs no API key: faithfulness 100%, recall@5 100%, refusal 91.7%. Injection resistance went from
+0% to 100% after a prompt-injection [postmortem](https://github.com/jani358/asklk-ai-assistant/blob/main/docs/POSTMORTEM-001-prompt-injection.md).
+These are numbers on the offline setup, not on a live model.
 
-Next: OCR for scanned PDFs (they currently fail with a clear message rather than silently indexing
-nothing), email verification and password reset, per-tenant embedding model selection, and a paid-tier
-billing story.
+[`samples/rag-citations/`](samples/rag-citations/)
 
-## Access to full source
+## A bug a test caught
 
-Interviewers / hiring managers: email me and I will add you as a **read-only collaborator** on the private repo for the
-duration of the process.
+The chunker added an overlap tail to a paragraph that already filled the chunk, which pushed every
+chunk over its target size. Nothing in the output would have shown it; answers would just have been a
+bit worse forever. A unit test caught it before the first document was ingested.
+
+[`samples/rag-chunking/`](samples/rag-chunking/)
+
+## Stack and numbers
+
+NestJS 10, Prisma, PostgreSQL 16 with pgvector, Redis, Next.js 15 with React 19, Tailwind v4 and
+shadcn/ui, the `@modelcontextprotocol/sdk`, OpenTelemetry traces to Jaeger, and Terraform for AWS.
+
+- Tests: 358 API unit tests, 42 integration tests against a real pgvector database (tenant isolation,
+  RLS, OIDC, the agent against a fake LLM server), 17 for the MCP server, 24 Playwright tests.
+- k6: chat p99 346 ms at 20 requests a second, on my laptop.
+- A 20-page PDF ingests in about 2 seconds.
+
+## What ran where
+
+There's no AWS account behind this. The Terraform plans 71 resources; 41 of them (S3, SQS with a DLQ,
+Secrets Manager, IAM, CloudWatch) were applied and destroyed on LocalStack 4.14. ECS, RDS and
+ElastiCache were only validated and planned. OIDC sign-in was tested against Keycloak in Docker. Uploads
+still go to local disk; the S3 bucket exists in Terraform but the app has no S3 client yet.
+
+## Docs
+
+Copies of the main docs are in [`docs/`](docs/):
+[architecture](docs/01-ARCHITECTURE.md), [RAG explained](docs/02-RAG-EXPLAINED.md) (start here if you
+read one), [database](docs/03-DATABASE.md), [security](docs/04-SECURITY.md). The ADRs, deployment
+guide and agent/MCP notes are in the [main repo](https://github.com/jani358/asklk-ai-assistant/tree/main/docs).
+
+## License
+
+Copyright (c) 2026 Janindu Gayanga. All rights reserved. See [LICENSE](LICENSE).
