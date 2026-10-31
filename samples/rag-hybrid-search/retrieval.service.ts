@@ -1,21 +1,10 @@
-/**
- * SHOWCASE EXCERPT — AskLK · apps/api/src/rag/retrieval.service.ts
- *
- * Demonstrates: the two search arms that feed the fusion, written as raw
- * parameterised SQL against pgvector and PostgreSQL full-text.
- *
- * The detail worth reading for: `"tenantId" = $1` lives INSIDE both queries.
- * Tenant isolation is a WHERE clause, never a filter applied afterwards in
- * TypeScript — and because the vectors live in the same database as the rows,
- * that pre-filter also shrinks the candidate set the index must consider. A
- * standalone vector database cannot do this: the filter would be in one system
- * and the data in another.
- */
-import { Injectable, Logger } from '@nestjs/common';
+// From apps/api/src/rag/retrieval.service.ts in github.com/jani358/asklk-ai-assistant.
+
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
-import { GeminiService } from '../gemini/gemini.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { EMBEDDER, type Embedder } from './embedder.port';
 import { FusedItem, RankedItem, reciprocalRankFusion } from './fusion';
 
 export interface RetrievedChunk {
@@ -31,6 +20,11 @@ export interface RetrievedChunk {
   /** ts_rank. Undefined when only the vector search matched it. */
   lexicalScore?: number;
   fusedScore: number;
+}
+
+/** Optional narrowing, used by the agent's search_documents tool. */
+export interface RetrievalFilters {
+  documentIds?: string[];
 }
 
 /** Raw row shape from the vector query. */
@@ -85,22 +79,32 @@ export class RetrievalService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly gemini: GeminiService,
+    @Inject(EMBEDDER) private readonly embedder: Embedder,
     private readonly config: ConfigService,
   ) {}
 
-  async retrieve(tenantId: string, question: string, topK?: number): Promise<RetrievedChunk[]> {
+  async retrieve(
+    tenantId: string,
+    question: string,
+    topK?: number,
+    filters: RetrievalFilters = {},
+  ): Promise<RetrievedChunk[]> {
     const k = topK ?? this.config.get<number>('retrieval.topK', 5);
+    // NULL means "all documents"; an array narrows both arms to those ids.
+    const documentIds = filters.documentIds?.length ? filters.documentIds : null;
 
     // RETRIEVAL_QUERY, not RETRIEVAL_DOCUMENT — see GeminiService.embed.
-    const queryVector = await this.gemini.embed(question, 'RETRIEVAL_QUERY');
+    const queryVector = await this.embedder.embed(question, 'RETRIEVAL_QUERY');
 
-    // Both arms run concurrently: they touch different indexes and neither
-    // depends on the other's result, so serialising them would just add latency.
-    const [vectorRows, lexicalRows] = await Promise.all([
-      this.vectorSearch(tenantId, queryVector),
-      this.lexicalSearch(tenantId, question),
-    ]);
+    // Two SQL queries, fused in TypeScript with RRF below. They run one after
+    // the other in one withTenant transaction, so row-level security
+    // applies on top of the tenantId in each WHERE clause (docs/adr/0007).
+    // A transaction runs its statements one after the other; the two index
+    // scans are a few milliseconds each, so that costs little.
+    const [vectorRows, lexicalRows] = await this.prisma.withTenant(tenantId, async (tx) => [
+      await this.vectorSearch(tx, tenantId, queryVector, documentIds),
+      await this.lexicalSearch(tx, tenantId, question, documentIds),
+    ] as const);
 
     const fused = reciprocalRankFusion({
       vector: vectorRows.map<RankedItem>((r) => ({ id: r.id, score: r.similarity })),
@@ -130,13 +134,18 @@ export class RetrievalService {
    *    set the index must consider, which is the pgvector-in-Postgres advantage
    *    over a standalone vector DB where the filter lives in a different system.
    */
-  private async vectorSearch(tenantId: string, queryVector: number[]): Promise<VectorRow[]> {
+  private async vectorSearch(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    queryVector: number[],
+    documentIds: string[] | null,
+  ): Promise<VectorRow[]> {
     // pgvector's text input format. Parameterised as a single string and cast,
     // rather than interpolated — a 768-element array built into SQL text would
     // be both an injection surface and a query-plan-cache buster.
     const literal = `[${queryVector.join(',')}]`;
 
-    return this.prisma.$queryRaw<VectorRow[]>`
+    return tx.$queryRaw<VectorRow[]>`
       SELECT
         c.id,
         c."documentId",
@@ -154,6 +163,7 @@ export class RetrievalService {
         -- some chunks but not all, so citing it would give a confidently
         -- incomplete answer.
         AND d.status = 'READY'
+        AND (${documentIds}::text[] IS NULL OR c."documentId" = ANY(${documentIds}::text[]))
       ORDER BY c.embedding <=> ${literal}::vector
       LIMIT ${RetrievalService.CANDIDATES_PER_ARM}
     `;
@@ -170,8 +180,13 @@ export class RetrievalService {
    * 'simple' configuration matches the generated column — a mismatch between the
    * two makes the GIN index unusable and silently sequential-scans.
    */
-  private async lexicalSearch(tenantId: string, question: string): Promise<LexicalRow[]> {
-    return this.prisma.$queryRaw<LexicalRow[]>`
+  private async lexicalSearch(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    question: string,
+    documentIds: string[] | null,
+  ): Promise<LexicalRow[]> {
+    return tx.$queryRaw<LexicalRow[]>`
       SELECT
         c.id,
         c."documentId",
@@ -186,6 +201,7 @@ export class RetrievalService {
       WHERE c."tenantId" = ${tenantId}
         AND d.status = 'READY'
         AND c."searchVector" @@ plainto_tsquery('simple', ${question})
+        AND (${documentIds}::text[] IS NULL OR c."documentId" = ANY(${documentIds}::text[]))
       ORDER BY rank DESC
       LIMIT ${RetrievalService.CANDIDATES_PER_ARM}
     `;

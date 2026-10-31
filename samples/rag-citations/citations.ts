@@ -1,17 +1,4 @@
-/**
- * SHOWCASE EXCERPT — AskLK · apps/api/src/rag/citations.ts
- *
- * Demonstrates: two of the four anti-hallucination layers.
- *
- * Layer 1, the similarity floor, refuses to answer BEFORE the model is called —
- * which both prevents the wrong answer and skips the most expensive call in the
- * pipeline. Layer 3, citation validation, strips any marker pointing at a
- * passage that was never retrieved.
- *
- * The design point behind both: source cards shown to the user are rendered
- * from the retrieved ROWS, never parsed out of the model's text, so an invented
- * citation can never manufacture a source.
- */
+// From apps/api/src/rag/citations.ts in github.com/jani358/asklk-ai-assistant.
 
 /**
  * Citation validation — anti-hallucination layer 3.

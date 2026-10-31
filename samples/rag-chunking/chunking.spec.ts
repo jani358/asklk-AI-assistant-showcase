@@ -1,11 +1,5 @@
-/**
- * SHOWCASE EXCERPT — AskLK · apps/api/src/rag/chunking.spec.ts
- *
- * Demonstrates: the tests that caught the overlap bug described in chunking.ts,
- * plus the boundary cases that matter for retrieval quality — paragraph
- * boundaries respected, a page number never spanning two chunks, and an
- * unsplittable blob hard-cut rather than left unusable.
- */
+// From apps/api/src/rag/chunking.spec.ts in github.com/jani358/asklk-ai-assistant.
+
 import { chunkBlocks, estimateTokens, splitParagraphs } from './chunking';
 
 describe('estimateTokens', () => {

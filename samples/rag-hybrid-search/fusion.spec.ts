@@ -1,11 +1,5 @@
-/**
- * SHOWCASE EXCERPT — AskLK · apps/api/src/rag/fusion.spec.ts
- *
- * Demonstrates: testing an algorithm by its PROPERTIES rather than by golden
- * outputs. The central case — "a document ranked 3rd in both lists beats one
- * ranked 1st in only one" — is the behaviour that justifies hybrid search, and
- * the last test pins down what the k constant is actually for.
- */
+// From apps/api/src/rag/fusion.spec.ts in github.com/jani358/asklk-ai-assistant.
+
 import { RRF_K, reciprocalRankFusion } from './fusion';
 
 const ids = (items: { id: string }[]): string[] => items.map((item) => item.id);

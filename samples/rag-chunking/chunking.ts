@@ -1,17 +1,5 @@
-/**
- * SHOWCASE EXCERPT — AskLK · apps/api/src/rag/chunking.ts
- *
- * Demonstrates: splitting extracted document text into retrievable passages,
- * and a bilingual token estimate (Sinhala is far denser per character in
- * byte-pair tokenisers, so it is counted at ~2 chars/token against English's 4).
- *
- * THIS FILE HAD A REAL BUG, and a unit test caught it before a single document
- * was ever ingested: the overlap tail was being prepended to a paragraph that
- * already filled the chunk on its own, pushing every chunk over target by the
- * whole overlap. The fix is the conditional near the end of chunkBlocks() —
- * keep the tail only if the incoming paragraph still leaves room for it. See
- * the corresponding test in chunking.spec.ts.
- */
+// From apps/api/src/rag/chunking.ts in github.com/jani358/asklk-ai-assistant.
+
 import { analyseLanguage } from './language';
 
 /**

@@ -1,11 +1,4 @@
-/**
- * SHOWCASE EXCERPT — AskLK · apps/api/src/rag/fusion.ts
- *
- * Demonstrates: how two ranked result lists with incomparable score scales are
- * merged into one. This is the heart of hybrid search — the reason a Sinhala
- * question can retrieve an English passage AND an exact course code still wins
- * on keyword match. See fusion.spec.ts alongside for the property tests.
- */
+// From apps/api/src/rag/fusion.ts in github.com/jani358/asklk-ai-assistant.
 
 /**
  * Reciprocal Rank Fusion — merging the vector and full-text result lists.

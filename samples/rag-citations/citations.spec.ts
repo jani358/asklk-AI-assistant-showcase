@@ -1,10 +1,5 @@
-/**
- * SHOWCASE EXCERPT — AskLK · apps/api/src/rag/citations.spec.ts
- *
- * Demonstrates: testing an anti-hallucination guard against the ways a model
- * actually misbehaves — an invented index, a mixed group like [1, 9] where half
- * is real, index 0, and the same thing in Sinhala.
- */
+// From apps/api/src/rag/citations.spec.ts in github.com/jani358/asklk-ai-assistant.
+
 import { passesSimilarityFloor, validateCitations } from './citations';
 
 describe('validateCitations', () => {
