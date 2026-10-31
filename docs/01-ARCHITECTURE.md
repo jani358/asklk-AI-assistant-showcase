@@ -1,5 +1,13 @@
 # 01 — Architecture
 
+> **Since Phase 2:** an answer is no longer a single retrieve-then-generate call.
+> - A cheap model classifies the question.
+> - A tool-calling agent then decides when to search, read a passage, list documents or propose a ticket. It takes at most five steps, and writes need the user to confirm.
+> - Generation goes through a provider-neutral `ChatModel` port (Gemini, Claude, OpenAI-compatible).
+> - An MCP server exposes the read tools to Claude.
+>
+> The retrieval, tenant isolation and anti-hallucination layers below are unchanged; they now run inside the `search_documents` tool. See [08 Agents and MCP](https://github.com/jani358/asklk-ai-assistant/blob/main/docs/08-AGENTS-AND-MCP.md).
+
 AskLK is a white-label, multi-tenant RAG chatbot. An organisation uploads its own
 documents; the people it serves ask questions in Sinhala or English and get answers in
 **the same language they asked in**, grounded only in those documents, with citations
@@ -56,7 +64,7 @@ Nine boxes. This is the whole thing, and it should take about two minutes on a w
                │  POST /chat/public/ask             │  HTTPS
                │  (SSE stream back)                 │
                │                       ┌────────────▼─────────────┐
-               │                       │   apps/web — Next.js 14  │
+               │                       │   apps/web — Next.js 15  │
                │                       │   admin dashboard        │
                │                       │   public chat page       │
                │                       └────────────┬─────────────┘
@@ -130,7 +138,7 @@ ordering is deliberate and fail-closed — a new endpoint is protected unless so
 explicitly opens it, so forgetting a decorator can never silently expose one tenant's
 documents to another.
 
-### apps/web — Next.js 14
+### apps/web — Next.js 15
 
 Two audiences in one app. The **admin dashboard** (behind auth: upload documents, watch
 ingestion status, read conversations, see unanswered questions, set branding and allowed
@@ -141,6 +149,20 @@ Next.js for the boring correct reasons: the admin side is highly interactive and
 auth so it is client-rendered, the public chat page benefits from server rendering for the
 first paint and for being linkable, and one framework gives both without a second build
 pipeline.
+
+**UI stack (Phase 1, Oct 2026).** React 19, Tailwind CSS v4 configured in CSS (`@theme` in
+`src/app/globals.css`, OKLCH tokens, dark-first with a light theme via next-themes), and
+shadcn/ui components on Radix in `src/components/ui`. Pages use semantic tokens
+(`bg-primary`, `text-muted-foreground`), never palette colours. Providers are split by
+need. The root layout has only theme and motion settings. The dashboard adds React Query
+and session restore (`DataProviders`). Pages with tooltips and toasts add
+`InteractiveProviders`. This split keeps the landing page's JavaScript small.
+
+The chat (`src/components/chat`) still talks to the API over the same SSE contract
+(`meta`, `sources`, `delta`, `done`, `error`). It derives a list of steps from those events
+(retrieval, then generation), so Phase 2's tool-call steps can slot into the same list.
+Form validation uses React Hook Form with Zod schemas in `src/lib/schemas.ts`, each
+mirroring a class-validator rule in the API DTOs.
 
 ### The widget — vanilla TypeScript
 
@@ -235,8 +257,8 @@ This is the walkthrough to be able to give from memory. Follow the numbers.
   8  │        embed(q, RETRIEVAL_QUERY) ───►│ cache? ───────┼─ miss ───────►│
      │                  │◄──── 768 floats ──┴───────────────┴──────────────┘
      │                  │                                   │
-  9  │        ┌─ vectorSearch  (HNSW, <=>, LIMIT 20) ───────►│  } in
-     │        └─ lexicalSearch (GIN, ts_rank, LIMIT 20) ────►│  } parallel
+  9  │        ┌─ vectorSearch  (HNSW, <=>, LIMIT 20) ───────►│  } one tx,
+     │        └─ lexicalSearch (GIN, ts_rank, LIMIT 20) ────►│  } in turn
      │                  │                                   │
  10  │        reciprocalRankFusion({vector, lexical}, k=60)  │   [pure]
      │        take top 5                                    │
@@ -317,9 +339,10 @@ same-language ones, so a floor tuned on English-only data would reject valid hit
 - **Sources are sent before the answer streams** (step 11→12 boundary). The UI can render
   "reading from `fees-2025.pdf`, page 3" while the first token is still in flight, which
   is a real chunk of the perceived-latency story.
-- **Both retrieval arms run in parallel** (step 9). They touch different indexes and
-  neither depends on the other's output; serialising them would just add latency for
-  nothing.
+- **The two retrieval arms are two SQL queries** (step 9), run one after the other inside
+  one `withTenant` transaction so row-level security applies to both (ADR 0007). Each is a
+  few milliseconds of index scan, so running them in turn costs little. The results are
+  merged in TypeScript with RRF.
 - **Citation validation runs on the assembled text, not per-delta** (step 14). A marker
   can be split across two network chunks — `[` arrives, then `2]` — and validating a
   partial marker would strip a valid one. The user has already seen the raw text; what is
@@ -403,7 +426,7 @@ calls in parallel at a free-tier key returns 429 for most of them, and the retri
 stampede. Serialising is slower in wall-clock terms but it *finishes*. This runs in a
 background job where nobody is watching a spinner, so throughput matters less than
 completion — a different trade from the retrieval path, where a user is waiting and the
-two arms are deliberately parallel.
+two arms are two short index scans.
 
 **Retries distinguish transient from permanent.** Three attempts, and the requeue only
 happens if the error looks transient. A Gemini 429 is worth retrying; "unsupported file

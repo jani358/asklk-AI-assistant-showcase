@@ -9,6 +9,8 @@ stops, gives the prompt-injection story the space it deserves, walks the OWASP T
 it actually applies here, and — at the end — lists what is deliberately **not**
 implemented.
 
+**The current STRIDE threat model, covering the agent, MCP keys, approvals and the SQS path, is §13.** Sections 1–12 describe v1; they are kept for the reasoning behind each control.
+
 That last section is not an apology. A security document that claims full coverage is a
 document nobody should trust. The useful thing to know about a small product is exactly
 where its edges are.
@@ -757,7 +759,7 @@ produces.
 | Restore drills happen on a machine that is then destroyed | A restored copy sitting on a laptop is an unmonitored second production database |
 | `STORAGE_DIR` is backed up with the same rules | The original PDFs are the same data in a different format |
 
-Deployment and backup mechanics live in the deployment guide in the private repo. The point here is that backups are a
+Deployment mechanics are in `05-DEPLOYMENT.md` §7. The point here is that backups are a
 PII surface with the same sensitivity as production, and the common failure is treating
 them as an ops concern rather than a data-protection one.
 
@@ -2277,3 +2279,134 @@ an authenticated tier for customers who have a backend.
 `WHERE` clause, and prompt injection is unsolved. The first is defensible because it is
 mechanical and tested. The second is defensible only because the model cannot do anything
 with a successful injection — and that stops being true the day it gets a tool.
+
+---
+
+## 13. STRIDE threat model (Phase 4.4, October 2026)
+
+Sections 1–12 were written for v1, when the model had **no tools**. Since then AskLK has gained a tool-calling agent with human approval, an MCP gateway with API keys, SSO, row-level security and an SQS ingestion path. This section re-runs the threat model over the current system using STRIDE:
+
+- **S**poofing
+- **T**ampering
+- **R**epudiation
+- **I**nformation disclosure
+- **D**enial of service
+- **E**levation of privilege
+
+Where it disagrees with an older section (for example §3.2 "no tools" or §11.4 "no audit log"), this section is current.
+
+Each row says what is **in place** (with the code or test that shows it) and what is still a **gap**.
+
+### 13.1 Data flow and trust boundaries
+
+```
+ Visitor browser ──(widget / public chat, no login)──┐
+ Dashboard user ──(JWT 15 min + refresh cookie)──────┤
+ Claude / an agent ──(MCP, tenant API key)── apps/mcp┤
+                                                     ▼
+                                     ┌───────────── apps/api ─────────────┐
+                                     │ guards: JWT · origin · rate limit  │
+                                     │ ChatService → AgentLoop → tools    │──► model provider
+                                     │ ApprovalService (writes)           │    (Gemini/Claude/OpenAI)
+                                     │ DocumentsService → IngestQueue ────┼──► Redis list / SQS + DLQ
+                                     │ IngestionWorker (same process)     │
+                                     └──────┬───────────────────┬─────────┘
+                                            ▼                   ▼
+                              Postgres (RLS role asklk_app)   Redis (rate limits, quota, OIDC state)
+```
+
+Untrusted input reaches the API at four points:
+- the public chat and the widget;
+- the dashboard;
+- the MCP gateway;
+- the **content of uploaded documents**, which reaches the model through tool results.
+
+Model output is untrusted too.
+
+### 13.2 Public chat (`/api/chat/public/*`, `/chat/[slug]`)
+
+| | Threat | In place | Gap |
+|---|---|---|---|
+| **S** | A visitor claims to be another visitor, to read or continue their conversation | Conversations are keyed by a server-made UUID; a follow-up needs the conversation id **and** a matching tenant slug | The conversation id works like a bearer token: anyone who sees it (a shared screenshot, a log) can continue that chat |
+| **T** | Prompt injection in the question ("ignore your rules") | <ul><li>Instruction-hierarchy prompt v2 (`prompts/agent-documents.md`)</li><li>Questions capped at 500 characters</li><li>Citations checked against real passages</li><li>Source cards built from rows, not from model text</li></ul> | Prompt injection is not solved; the model can still give one wrong answer |
+| **R** | A visitor denies having asked something abusive | Every message is stored with tenant, conversation and time; every model call has an `llm_calls` row | No IP is stored with the message (on purpose, §4), so an anonymous visitor's identity cannot be proved |
+| **I** | The bot leaks another tenant's documents | <ul><li>Retrieval runs inside `prisma.withTenant()` under RLS.</li><li>The tenant comes from the slug, never from the body.</li><li>`rls.e2e-spec.ts` runs `SELECT * FROM chunks` with no WHERE and still sees one tenant.</li></ul> | An answer can quote any document of **that** tenant; there are no per-document permissions inside a tenant |
+| **D** | Burn a tenant's quota or the shared model key | <ul><li>Per-IP sliding-window limits (`@RateLimit(20, 60)` on ask)</li><li>A monthly message quota, mirrored in Postgres</li><li>A per-tenant **monthly USD budget**, checked before any model call (3.5)</li><li>The 5-step agent cap</li></ul> | <ul><li>The rate limiter fails open if Redis is down (§6.4).</li><li>There is no CAPTCHA, so a botnet with many IPs can still use up a tenant's quota.</li></ul> |
+| **E** | Make the agent run a write tool without consent | A write (`create_ticket`) only creates a `PENDING_APPROVAL` row; nothing runs until someone clicks Confirm (13.6) | — |
+
+### 13.3 The widget (Shadow-DOM script on customer sites)
+
+| | Threat | In place | Gap |
+|---|---|---|---|
+| **S** | Another site embeds a tenant's widget and uses its quota | An exact-origin allow list per tenant, single-level wildcard only, fail-closed when the list is empty (§7) | <ul><li>`Origin` is a browser control: a script (curl) can send any Origin. The per-IP limit and the quota are the real limits.</li><li>No signed widget tokens (§11.11).</li></ul> |
+| **T** | The host page tampers with the widget's DOM or reads its answers | Shadow DOM isolates styles; answers are rendered as text, not HTML | The host page runs in the same JavaScript realm, so it can read anything the widget shows. This comes with embedding and is accepted |
+| **R** | — | Same as the public chat | — |
+| **I** | Tenant branding or config leaks something private | The public config endpoint returns only the name, colour, logo URL and greeting | — |
+| **D** | A popular site sends a burst of traffic to one tenant | Rate limits and quota, as above | No per-origin rate limit; no edge cache or WAF (§11.12) |
+| **E** | XSS from a tenant-controlled field (greeting, colour) into the host page | `primaryColor` is checked as hex (§9.3); text fields are set with `textContent` | `logoUrl` can be any https URL; it is only used as an `<img src>` |
+
+### 13.4 MCP gateway and tenant API keys (`/api/mcp/*`, `apps/mcp`)
+
+| | Threat | In place | Gap |
+|---|---|---|---|
+| **S** | A stolen or guessed key is used | Keys are:<ul><li>high-entropy random, with a visible prefix, so a leaked key is easy to spot;</li><li>shown once;</li><li>stored as SHA-256;</li><li>revocable from Settings.</li></ul> | Keys **never expire** and are not bound to an IP or a client; there is no "last used" alert |
+| **T** | An MCP client calls a write tool | The gateway exposes only the read-only `MCP_TOOLS` (`search_documents`, `get_source`, `list_documents`); writes cannot be reached over MCP (ADR 0005) | — |
+| **R** | A tenant denies that their agent read a document | Each MCP tool call writes a `tool_calls` audit row with origin `MCP` | The audit rows live in the same database, so an attacker with database access could edit them; there is no append-only log |
+| **I** | A key for tenant A reads tenant B | <ul><li>The key resolves to one tenant on the server.</li><li>Tools run for that tenant inside RLS.</li><li>The MCP server is only an API client and never touches the database.</li></ul> | A key gives access to **all** of that tenant's documents; there are no scopes per document set |
+| **D** | A runaway agent loops on `search_documents` | Rate limits per key in the API (`@RateLimit(60, 60)`) and in the MCP HTTP server | — |
+| **E** | A key is used to manage keys or settings | The API-key guard is accepted only on `/api/mcp/*`; managing keys needs a dashboard JWT with the ADMIN role or above | — |
+
+### 13.5 Document upload and ingestion
+
+| | Threat | In place | Gap |
+|---|---|---|---|
+| **S** | A MEMBER, or another tenant, uploads into a tenant | Uploading needs a JWT; the tenant comes from the token's `tid` | — |
+| **T** | **Indirect prompt injection:** a document says "ignore your instructions" or contains fake tool-call markup | <ul><li>`sanitizePassage` strips tool-call markup, role tags, delimiters and instruction-like sentences.</li><li>Passages are wrapped in delimiters and declared as data.</li><li>Tool results rank below the user.</li><li>10 golden injection cases gate CI: 0% → 100% (`docs/POSTMORTEM-001-prompt-injection.md`).</li></ul> | A new attack shape the sanitiser does not know. Each new shape needs a golden case |
+| **T** | Path traversal through the filename | Files are stored as `tenantId/<uuid>.<ext>`; the user's filename is only data (§9.2) | — |
+| **R** | "I never uploaded that" | `documents` rows carry the tenant and the time | No uploader user id on the row; no audit row for an upload or a delete |
+| **I** | Uploaded files readable by others | Files are on local disk outside the web root. The S3 bucket in Terraform is private, with public access blocked, but the app has no S3 client yet and does not write to it | No encryption at rest beyond the disk or S3 default (§11.5) |
+| **D** | Huge or malformed files stall the worker | <ul><li>A 20 MB limit, plus an extension and MIME check.</li><li>Three attempts, then `FAILED`.</li><li>On SQS, a poison message goes to the DLQ and an alarm fires (ADR 0009, tested on LocalStack).</li></ul> | <ul><li>Parsing runs **in the API process**, so a parser that hangs or eats memory affects chat too.</li><li>No per-tenant storage cap.</li></ul> |
+| **E** | A parser bug (`pdf-parse`, `mammoth`) runs attacker code | Pinned dependencies; CodeQL, Dependabot and `npm audit` in CI | No parsing sandbox and no virus scan (§11.6). The worst parser bug is remote code execution with the API's database credentials. The fix: move parsing to a separate worker (Phase 6) with a role that can only write chunks |
+
+### 13.6 Tool calls and approvals
+
+| | Threat | In place | Gap |
+|---|---|---|---|
+| **S** | Someone approves an action that is not theirs | Approvals are tenant-scoped; the public endpoint also needs the conversation id to match the action's (`approval-service.spec.ts`) | Anyone holding the conversation id can approve (see 13.2) |
+| **T** | A document injects a tool call, or changes the input of a pending write | <ul><li>The stored input is what runs; the model cannot change it after the card is shown.</li><li>Injected markup is stripped before the model sees it.</li><li>Zod checks every tool input.</li></ul> | The approval card shows a summary; a long injected summary could still mislead a user into confirming |
+| **R** | "The bot did that on its own" | One `tool_calls` row per call (tool, input, status, timing, origin); the decision is stored as a message | — |
+| **I** | A tool returns another tenant's data | Read tools run inside `withTenant` (RLS) | — |
+| **D** | The agent loops or a tool hangs | 5 model steps, at most 4 tool calls per step, 15 s per tool, and a final step with `toolChoice: none` (ADR 0002) | — |
+| **E** | A write runs twice (double click, replay) | The row is claimed with a conditional `UPDATE`, so it runs at most once; approvals expire after 30 minutes | Only one write tool exists today; each new write tool needs the same review |
+
+### 13.7 Multi-tenant data and identity
+
+| | Threat | In place | Gap |
+|---|---|---|---|
+| **S** | A forged JWT, a stolen refresh token, an SSO account takeover | <ul><li>Separate secrets of 32+ characters, checked at boot.</li><li>Refresh-token rotation with reuse detection.</li><li>OIDC with PKCE S256; state and nonce kept for one use; the ID token checked against the JWKS.</li><li>Only **verified** emails link, and only to existing accounts (ADR 0008).</li></ul> | No 2FA; no password reset (§11.2, §11.3) |
+| **T** | A tenant admin edits another tenant's rows | Every write is scoped by `tenantId` (`updateMany` with the tenant); RLS on tenant tables | RLS is applied only on the paths that reach a model (retrieval, `get_source`, `list_documents`). The other paths still rely on the `tenantId` filter alone (ADR 0007) |
+| **R** | Admin actions cannot be traced | Tool calls and model calls are logged | No general audit log for settings, key, member and document changes (§11.4) |
+| **I** | Cross-tenant reads; secrets in traces or logs | <ul><li>The tenant comes from the token only; reads use `findFirst` with the tenant.</li><li>10 tenant-isolation e2e tests and 9 RLS tests.</li><li>Spans carry ids and token counts, but **no prompt, answer, passage or SQL text**.</li><li>Sentry events are scrubbed: no cookies, no auth headers.</li></ul> | A database dump exposes document text (§11.5) |
+| **D** | One tenant degrades the others (noisy neighbour) | Per-tenant quotas and budgets; ingestion runs one job at a time | All tenants share one API process and one model key |
+| **E** | MEMBER to ADMIN, or tenant to platform | A `RolesGuard` rank check; no platform superuser (§2.5); the app's database role `asklk_app` cannot bypass RLS | The migration role is a superuser; only `prisma migrate` uses it |
+
+### 13.8 Supply chain and infrastructure
+
+- **In place:**
+  - CodeQL, Dependabot, `npm audit` (production, high/critical) and Terraform checks in `security.yml`.
+  - GitHub OIDC for deploys, so there are no long-lived AWS keys.
+  - Least-privilege task roles.
+  - Secrets in Secrets Manager; model keys never sit in Terraform state.
+- **Gap:** on 2026-10-31, `npm audit` reports a critical and a high advisory in `tar`, pulled in by `bcrypt` → `@mapbox/node-pre-gyp`.
+  - `tar` is used only when `bcrypt` builds its native module at install time, not at runtime.
+  - The fix is a `tar` override once `node-pre-gyp` supports it, or a move to `bcryptjs` or argon2.
+
+### 13.9 Gaps, in the order to fix them
+
+1. **Sandbox document parsing** (13.5 E). It is the only path from attacker bytes to code execution. The fix is Phase 6, a separate worker.
+2. **Expiry and "last used" for API keys** (13.4 S).
+3. **A general audit log** for settings, members, keys and document deletes (13.7 R).
+4. **RLS on every tenant path**, not only the model paths (13.7 T).
+5. **Bind public approvals to the visitor** with a signed visitor token, not only the conversation id (13.6 S).
+6. **2FA and password reset** (13.7 S).
+7. **Edge protection** (a WAF, a CAPTCHA on the public chat) before a high-traffic customer (13.2 D).
